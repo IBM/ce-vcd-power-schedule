@@ -1,0 +1,4 @@
+schedule*.yaml
+*.sh
+bin/
+.vscode/

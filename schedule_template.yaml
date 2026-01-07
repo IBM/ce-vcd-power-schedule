@@ -1,0 +1,14 @@
+entities:
+  - type: vApp
+    name: "vApp Name"
+  - type: vm
+    name: "VM Name"
+exclusions:
+  timezone: Europe/Rome
+  dates:
+    - date: 'YYYY-MM-DD'
+      annual: true
+  ranges:
+    - from: 'YYYY-MM-DD'
+      to: 'YYYY-MM-DD'
+      annual: false
