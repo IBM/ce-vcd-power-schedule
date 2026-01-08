@@ -17,6 +17,7 @@ Before using the project, ensure you have:
 - A **resource group** to deploy resources
 - A **Virtual Data Center** in IBM Cloud VMware Cloud Foundation as a Service
 - At least one vApp or VM within the VDC
+- **jq** and **bash** available in your environment
 
 ---
 
