@@ -2,3 +2,4 @@ schedule*.yaml
 *.sh
 bin/
 .vscode/
+.env
