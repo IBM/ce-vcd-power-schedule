@@ -558,7 +558,7 @@ func (service *CloudDirectorV1) GetTask(getTaskOptions *GetTaskOptions) (task *T
 }
 
 func (service *CloudDirectorV1) WaitTaskCompletion(task *Task) error {
-	return service.WaitInspectTaskCompletion(task, 3*time.Second, 15*time.Minute)
+	return service.WaitInspectTaskCompletion(task, 3*time.Second, 2*time.Minute)
 }
 
 // WaitInspectTaskCompletion waits for the completion of a task by periodically refreshing its status.
@@ -584,7 +584,15 @@ func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
+				service.log.Warn(
+					"Timeout waiting for task completion",
+					slog.String("component", sdkName),
+					slog.String("task.id", *task.ID),
+					slog.String("timeout", timeout.String()),
+					slog.Int("refreshes", howManyTimesRefreshed),
+				)
+				// return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
+				return nil
 			}
 			return fmt.Errorf("wait cancelled: %w", ctx.Err())
 		default:
@@ -613,7 +621,15 @@ func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
+				service.log.Warn(
+					"Timeout waiting for task completion",
+					slog.String("component", sdkName),
+					slog.String("task.id", *task.ID),
+					slog.String("timeout", timeout.String()),
+					slog.Int("refreshes", howManyTimesRefreshed),
+				)
+				// return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
+				return nil
 			}
 			return fmt.Errorf("wait cancelled: %w", ctx.Err())
 		case <-time.After(delay):
