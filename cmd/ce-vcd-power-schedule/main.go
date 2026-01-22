@@ -27,10 +27,11 @@ var allowedRegions = []string{"eu-de", "us-east"}
 
 // consts define constants for entity types.
 const (
-	vmType    = "vm"
-	vappType  = "vApp"
-	statusOn  = "POWERED_ON"
-	statusOff = "POWERED_OFF"
+	vmType      = "vm"
+	vappType    = "vApp"
+	statusOn    = "POWERED_ON"
+	statusOff   = "POWERED_OFF"
+	statusMixed = "MIXED"
 )
 
 // Entity represents a VM or vApp in the configuration.
@@ -516,11 +517,22 @@ func handleEntity(vcdClient *clouddirector.CloudDirectorV1, entity Entity, actio
 	)
 }
 
+// Helper function to check if a slice contains a string
+func contains(slice []string, str string) bool {
+	for _, item := range slice {
+		if item == str {
+			return true
+		}
+	}
+	return false
+}
+
 func performAction(action string, entity Entity, record *clouddirector.Record, vcdClient *clouddirector.CloudDirectorV1, log *slog.Logger) (task *clouddirector.Task, err error) {
 	switch action {
 	case "powerOff":
-		if record.Status != nil && *record.Status != statusOn {
-			log.Warn(fmt.Sprintf("%s is not powered on; no action needed", entity.Type),
+		allowedStates := []string{statusOn, statusMixed}
+		if record.Status != nil && !contains(allowedStates, *record.Status) {
+			log.Warn(fmt.Sprintf("%s is not powered on or partially running; no action needed", entity.Type),
 				slog.String("component", "handler.entity"),
 				slog.String("entity.name", entity.Name),
 				slog.String("entity.type", entity.Type),
@@ -542,7 +554,8 @@ func performAction(action string, entity Entity, record *clouddirector.Record, v
 			})
 		}
 	case "powerOn":
-		if record.Status != nil && *record.Status != statusOff {
+		allowedStates := []string{statusOff}
+		if record.Status != nil && !contains(allowedStates, *record.Status) {
 			log.Warn(fmt.Sprintf("%s is not powered off; no action needed", entity.Type),
 				slog.String("component", "handler.entity"),
 				slog.String("entity.name", entity.Name),
