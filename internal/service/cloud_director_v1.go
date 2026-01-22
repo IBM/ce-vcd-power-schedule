@@ -558,17 +558,37 @@ func (service *CloudDirectorV1) GetTask(getTaskOptions *GetTaskOptions) (task *T
 }
 
 func (service *CloudDirectorV1) WaitTaskCompletion(task *Task) error {
-	return service.WaitInspectTaskCompletion(task, 3*time.Second)
+	return service.WaitInspectTaskCompletion(task, 3*time.Second, 15*time.Minute)
 }
 
-func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time.Duration) error {
+// WaitInspectTaskCompletion waits for the completion of a task by periodically refreshing its status.
+//
+// Parameters:
+// task:    the Task object to monitor
+// delay:   the duration to wait between status checks
+// timeout: the maximum duration to wait for task completion
+//
+// Return values:
+// error: a non-nil error object if an error occurred or if the task did not complete successfully
+func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time.Duration, timeout time.Duration) error {
 
 	if task == nil {
 		return fmt.Errorf("cannot refresh, Object is empty")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	howManyTimesRefreshed := 0
 	for {
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
+			}
+			return fmt.Errorf("wait cancelled: %w", ctx.Err())
+		default:
+		}
 		howManyTimesRefreshed++
 		task, _, err := service.GetTask(&GetTaskOptions{
 			Href: *task.Href,
@@ -580,13 +600,25 @@ func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time
 		// If task is not in a waiting status we're done, check if there's an error and return it.
 		if !isTaskRunning(*task.Status) {
 			if *task.Status == "error" {
-				return fmt.Errorf("task did not complete successfully: %s", err)
+				var detail string
+				if task.Error != nil {
+					detail = *task.Error
+				}
+				return fmt.Errorf("task did not complete successfully: %s", detail)
 			}
 			return nil
 		}
 
-		// Sleep for a given period and try again.
-		time.Sleep(delay)
+		// Task is still running, wait and refresh
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
+			}
+			return fmt.Errorf("wait cancelled: %w", ctx.Err())
+		case <-time.After(delay):
+			//continue
+		}
 	}
 }
 
