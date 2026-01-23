@@ -29,7 +29,8 @@ type CloudDirectorV1 struct {
 	DefaultHeaders http.Header
 	Client         *http.Client
 	UserAgent      string
-	log            *slog.Logger
+	Log            *slog.Logger
+	Timeout        time.Duration
 }
 
 // CloudDirectorV1Options : Service options
@@ -39,6 +40,7 @@ type CloudDirectorV1Options struct {
 	IAMToken string
 	Auth     BearerTokenAuth
 	Log      *slog.Logger
+	Timeout  time.Duration
 }
 
 const (
@@ -66,10 +68,11 @@ func NewCloudDirectorV1(options *CloudDirectorV1Options) (service *CloudDirector
 		ServiceURL: options.URL,
 		Auth:       auth,
 		Client:     DefaultHTTPClient(),
-		log:        options.Log.With("service", sdkName),
+		Log:        options.Log.With("service", sdkName),
 	}
 
 	service.SetUserAgent(service.buildUserAgent())
+	service.SetTimeout(options.Timeout)
 
 	return service, nil
 }
@@ -119,7 +122,7 @@ func (service *CloudDirectorV1) DisableSSLVerification() {
 		// Disable server ssl cert & hostname verification.
 		tr.TLSClientConfig.InsecureSkipVerify = true // #nosec G402
 	}
-	service.log.Debug("Disabled SSL verification in HTTP client")
+	service.Log.Debug("Disabled SSL verification in HTTP client")
 }
 
 var systemInfo = fmt.Sprintf("(lang=go; arch=%s; os=%s; go.version=%s)", runtime.GOARCH, runtime.GOOS, runtime.Version())
@@ -139,7 +142,16 @@ func (service *CloudDirectorV1) SetUserAgent(userAgent string) {
 		userAgent = service.buildUserAgent()
 	}
 	service.UserAgent = userAgent
-	service.log.Debug("Set User-Agent", slog.String("userAgent", userAgent))
+	service.Log.Debug("Set User-Agent", slog.String("userAgent", userAgent))
+}
+
+// SetUserAgent sets timeout value.
+func (service *CloudDirectorV1) SetTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	service.Timeout = timeout
+	service.Log.Debug("Set Timeout", slog.String("timeout", timeout.String()))
 }
 
 // SetServiceURL imposta l'URL base del servizio.
@@ -148,7 +160,7 @@ func (service *CloudDirectorV1) SetServiceURL(serviceURL string) error {
 		return err
 	}
 	service.ServiceURL = strings.TrimRight(serviceURL, "/")
-	service.log.Info("Service URL set", slog.String("url", service.ServiceURL))
+	service.Log.Info("Service URL set", slog.String("url", service.ServiceURL))
 	return nil
 }
 
@@ -558,7 +570,7 @@ func (service *CloudDirectorV1) GetTask(getTaskOptions *GetTaskOptions) (task *T
 }
 
 func (service *CloudDirectorV1) WaitTaskCompletion(task *Task) error {
-	return service.WaitInspectTaskCompletion(task, 3*time.Second, 2*time.Minute)
+	return service.WaitInspectTaskCompletion(task, 3*time.Second, service.Timeout)
 }
 
 // WaitInspectTaskCompletion waits for the completion of a task by periodically refreshing its status.
@@ -584,9 +596,9 @@ func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				service.log.Warn(
+				service.Log.Warn(
 					"Timeout waiting for task completion",
-					slog.String("component", sdkName),
+					slog.String("component", "WaitInspectTaskCompletion"),
 					slog.String("task.id", *task.ID),
 					slog.String("timeout", timeout.String()),
 					slog.Int("refreshes", howManyTimesRefreshed),
@@ -621,7 +633,7 @@ func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				service.log.Warn(
+				service.Log.Warn(
 					"Timeout waiting for task completion",
 					slog.String("component", sdkName),
 					slog.String("task.id", *task.ID),
@@ -730,17 +742,17 @@ func (service *CloudDirectorV1) Request(req *http.Request, result interface{}) (
 	service.Auth.Authenticate(req)
 
 	// If debug is enabled, then dump the request.
-	if service.log.Enabled(context.Background(), slog.LevelDebug) {
+	if service.Log.Enabled(context.Background(), slog.LevelDebug) {
 		buf, dumpErr := httputil.DumpRequestOut(req, !core.IsNil(req.Body))
 		if dumpErr == nil {
-			service.log.Debug("Dump Request", slog.String("request", core.RedactSecrets(string(buf))))
+			service.Log.Debug("Dump Request", slog.String("request", core.RedactSecrets(string(buf))))
 		} else {
-			service.log.Debug("error while attempting to log outbound request", slog.String("error", dumpErr.Error()))
+			service.Log.Debug("error while attempting to log outbound request", slog.String("error", dumpErr.Error()))
 		}
 	}
 
 	// Invoke the request, then check for errors during the invocation.
-	service.log.Debug("Sending HTTP request message...")
+	service.Log.Debug("Sending HTTP request message...")
 	var httpResponse *http.Response
 	httpResponse, err = service.Client.Do(req)
 	if err != nil {
@@ -750,15 +762,15 @@ func (service *CloudDirectorV1) Request(req *http.Request, result interface{}) (
 		err = errors.New("no-connection-made" + "\n" + err.Error())
 		return
 	}
-	service.log.Debug("Received HTTP response message", slog.Int("status_code", httpResponse.StatusCode))
+	service.Log.Debug("Received HTTP response message", slog.Int("status_code", httpResponse.StatusCode))
 
 	// If debug is enabled, then dump the response.
-	if service.log.Enabled(context.Background(), slog.LevelDebug) {
+	if service.Log.Enabled(context.Background(), slog.LevelDebug) {
 		buf, dumpErr := httputil.DumpResponse(httpResponse, !core.IsNil(httpResponse.Body))
 		if err == nil {
-			service.log.Debug("Response", slog.String("body", core.RedactSecrets(string(buf))))
+			service.Log.Debug("Response", slog.String("body", core.RedactSecrets(string(buf))))
 		} else {
-			service.log.Debug("error while attempting to log inbound response", slog.String("error:", dumpErr.Error()))
+			service.Log.Debug("error while attempting to log inbound response", slog.String("error:", dumpErr.Error()))
 		}
 	}
 

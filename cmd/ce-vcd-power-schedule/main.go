@@ -345,6 +345,7 @@ func main() {
 	region := os.Getenv("IBM_REGION")
 	siteName := os.Getenv("DIRECTOR_SITE_NAME")
 	vdcName := os.Getenv("VIRTUAL_DATA_CENTER")
+	taskTimeout := os.Getenv("TASK_TIMEOUT_SECONDS")
 
 	t = logging.StartTimed()
 	svc, auth, err := buildVmwareService(apiKey, region)
@@ -400,6 +401,11 @@ func main() {
 		Org:      vcd.OrgName,
 		IAMToken: accessToken,
 		Log:      log,
+	}
+	if taskTimeout != "" {
+		if t, err := time.ParseDuration(taskTimeout + "s"); err == nil {
+			cloudDirectorV1Options.Timeout = t
+		}
 	}
 
 	t = logging.StartTimed()

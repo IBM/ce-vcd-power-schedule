@@ -16,6 +16,7 @@ IBM_APIKEY=${IBM_APIKEY:-}  # IBM API key for authentication
 IBM_REGION=${IBM_REGION:-eu-de} # IBM Cloud region
 DIRECTOR_SITE_NAME=${DIRECTOR_SITE_NAME:-IBM VCFaaS Multitenant - FRA} # Name of the Director site
 VIRTUAL_DATA_CENTER=${VIRTUAL_DATA_CENTER:-} # Name of the Virtual Data Center
+TASK_TIMEOUT_SECONDS=${TASK_TIMEOUT_SECONDS:-900} # Timeout for tasks in seconds
 
 # Check for required environment variables
 if [[ -z "$IBM_APIKEY" ]]; then echo "ERROR: IBM_APIKEY is required."; exit 1; fi
@@ -73,6 +74,7 @@ if ibmcloud ce configmap get --name "$CONFIGMAP_NAME" >/dev/null 2>&1; then
     --from-literal DIRECTOR_SITE_NAME="$DIRECTOR_SITE_NAME" \
     --from-literal VIRTUAL_DATA_CENTER="$VIRTUAL_DATA_CENTER" \
     --from-literal IBM_REGION="$IBM_REGION" \
+    --from-literal TASK_TIMEOUT_SECONDS="$TASK_TIMEOUT_SECONDS" \
     --from-literal LOG_LEVEL="Info"
 else
   ibmcloud ce configmap create \
