@@ -560,9 +560,9 @@ func performAction(action string, entity Entity, record *clouddirector.Record, v
 			})
 		}
 	case "powerOn":
-		allowedStates := []string{statusOff}
+		allowedStates := []string{statusOff, statusMixed}
 		if record.Status != nil && !contains(allowedStates, *record.Status) {
-			log.Warn(fmt.Sprintf("%s is not powered off; no action needed", entity.Type),
+			log.Warn(fmt.Sprintf("%s is not powered off or partially running; no action needed", entity.Type),
 				slog.String("component", "handler.entity"),
 				slog.String("entity.name", entity.Name),
 				slog.String("entity.type", entity.Type),
