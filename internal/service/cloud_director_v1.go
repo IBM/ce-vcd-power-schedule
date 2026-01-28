@@ -415,7 +415,10 @@ func (service *CloudDirectorV1) UndeployvApp(objectRefOptions *ObjectRefOptions)
 	}
 	builder.AddHeader("Accept", "application/*+json;version="+APIVersion)
 	builder.AddHeader("Content-Type", MimeUndeployVappParams)
-	xmlbody, _ := xml.MarshalIndent(vu, "", "  ")
+	xmlbody, err := xml.MarshalIndent(vu, "", "  ")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal undeploy parameters: %w", err)
+	}
 	builder.SetBodyContentString(string(xmlbody))
 	request, err := builder.Build()
 	if err != nil {
@@ -457,7 +460,10 @@ func (service *CloudDirectorV1) DeployvApp(objectRefOptions *ObjectRefOptions) (
 	}
 	builder.AddHeader("Accept", "application/*+json;version="+APIVersion)
 	builder.AddHeader("Content-Type", MimeDeployVappParams)
-	xmlbody, _ := xml.MarshalIndent(vu, "", "  ")
+	xmlbody, err := xml.MarshalIndent(vu, "", "  ")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal deploy parameters: %w", err)
+	}
 	builder.SetBodyContentString(string(xmlbody))
 	request, err := builder.Build()
 	if err != nil {
@@ -596,15 +602,15 @@ func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				service.Log.Warn(
+				service.Log.Error(
 					"Timeout waiting for task completion",
 					slog.String("component", "WaitInspectTaskCompletion"),
 					slog.String("task.id", *task.ID),
 					slog.String("timeout", timeout.String()),
 					slog.Int("refreshes", howManyTimesRefreshed),
 				)
-				// return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
-				return nil
+				return fmt.Errorf("task timeout after %s (%d status checks): task may still be running in VCD. Consider increasing TASK_TIMEOUT_SECONDS environment variable",
+					timeout, howManyTimesRefreshed)
 			}
 			return fmt.Errorf("wait cancelled: %w", ctx.Err())
 		default:
@@ -633,15 +639,15 @@ func (service *CloudDirectorV1) WaitInspectTaskCompletion(task *Task, delay time
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				service.Log.Warn(
+				service.Log.Error(
 					"Timeout waiting for task completion",
 					slog.String("component", sdkName),
 					slog.String("task.id", *task.ID),
 					slog.String("timeout", timeout.String()),
 					slog.Int("refreshes", howManyTimesRefreshed),
 				)
-				// return fmt.Errorf("timeout waiting for task completion after %s (refreshes=%d)", timeout, howManyTimesRefreshed)
-				return nil
+				return fmt.Errorf("task timeout after %s (%d status checks): task may still be running in VCD. Consider increasing TASK_TIMEOUT_SECONDS environment variable",
+					timeout, howManyTimesRefreshed)
 			}
 			return fmt.Errorf("wait cancelled: %w", ctx.Err())
 		case <-time.After(delay):

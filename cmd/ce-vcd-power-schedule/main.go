@@ -80,24 +80,41 @@ func loadConfig(path string) (*Config, error) {
 }
 
 // nowInLocation returns the current time in the specified timezone.
-func nowInLocation(tz string) time.Time {
+func nowInLocation(tz string, log *slog.Logger) time.Time {
 	if tz == "" {
+		log.Debug("no timezone specified, using UTC",
+			slog.String("component", "scheduler"),
+		)
 		return time.Now().UTC()
 	}
 	loc, err := time.LoadLocation(tz)
-	if err == nil {
-		return time.Now().In(loc)
+	if err != nil {
+		log.Warn("invalid timezone, falling back to UTC",
+			slog.String("component", "scheduler"),
+			slog.String("timezone", tz),
+			slog.Any("error", err),
+			slog.String("suggestion", "Use IANA timezone names like 'America/New_York' or 'Europe/London'"),
+		)
+		return time.Now().UTC()
 	}
-	return time.Now().UTC()
+	return time.Now().In(loc)
 }
 
-// parseDateOrPanic parses a date string and panics on error.
-func parseDateOrPanic(s string) time.Time {
+// safeString safely dereferences a string pointer, returning a placeholder if nil.
+func safeString(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
+}
+
+// parseDate parses a date string and returns an error if invalid.
+func parseDate(s string) (time.Time, error) {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
-		panic(fmt.Errorf("Invalid date %q: %w", s, err))
+		return time.Time{}, fmt.Errorf("invalid date format %q: expected YYYY-MM-DD (e.g., 2024-01-15): %w", s, err)
 	}
-	return t
+	return t, nil
 }
 
 // sameDate checks if two times refer to the same date.
@@ -121,27 +138,36 @@ func inAnnualRange(now, from, to time.Time) bool {
 }
 
 // inExclusions checks if the current time is within any exclusion rules.
-func inExclusions(cfg *Config, now time.Time) (bool, string) {
-	for _, d := range cfg.Exclusions.Dates {
-		dt := parseDateOrPanic(d.Date)
+func inExclusions(cfg *Config, now time.Time) (bool, string, error) {
+	for i, d := range cfg.Exclusions.Dates {
+		dt, err := parseDate(d.Date)
+		if err != nil {
+			return false, "", fmt.Errorf("exclusions.dates[%d]: %w", i, err)
+		}
 		if d.Annual && sameMonthDay(now, dt) {
-			return true, fmt.Sprintf("excluded (annual day %s)", d.Date)
+			return true, fmt.Sprintf("excluded (annual day %s)", d.Date), nil
 		}
 		if !d.Annual && sameDate(now, dt) {
-			return true, fmt.Sprintf("excluded (day %s)", d.Date)
+			return true, fmt.Sprintf("excluded (day %s)", d.Date), nil
 		}
 	}
-	for _, r := range cfg.Exclusions.Ranges {
-		f := parseDateOrPanic(r.From)
-		t := parseDateOrPanic(r.To)
+	for i, r := range cfg.Exclusions.Ranges {
+		f, err := parseDate(r.From)
+		if err != nil {
+			return false, "", fmt.Errorf("exclusions.ranges[%d].from: %w", i, err)
+		}
+		t, err := parseDate(r.To)
+		if err != nil {
+			return false, "", fmt.Errorf("exclusions.ranges[%d].to: %w", i, err)
+		}
 		if r.Annual && inAnnualRange(now, f, t) {
-			return true, fmt.Sprintf("excluded (annual range %s..%s)", r.From, r.To)
+			return true, fmt.Sprintf("excluded (annual range %s..%s)", r.From, r.To), nil
 		}
 		if !r.Annual && !now.Before(f) && !now.After(t) {
-			return true, fmt.Sprintf("excluded (range %s..%s)", r.From, r.To)
+			return true, fmt.Sprintf("excluded (range %s..%s)", r.From, r.To), nil
 		}
 	}
-	return false, ""
+	return false, "", nil
 }
 
 // buildVmwareService initializes the VMware VCFaaS SDK with the given API key and region.
@@ -216,16 +242,13 @@ func discoverVcdInfo(ctx context.Context, svc *vmw.VmwareV1, siteName, vdcName s
 		return nil, fmt.Errorf("no VDCs found")
 	}
 
-	// Find a VDC that belongs to the selected site and (optionally) matches vdcName
+	// Find a VDC that belongs to the selected site and matches vdcName
 	var selectedVdc *vmw.VDC
 	for i := range vdcs.Vdcs {
 		v := vdcs.Vdcs[i]
 
-		// Defensive nil checks + single membership check
+		// Defensive nil checks
 		if v.DirectorSite == nil || v.DirectorSite.ID == nil {
-			continue
-		}
-		if *v.DirectorSite.ID != *site.ID {
 			continue
 		}
 
@@ -233,6 +256,7 @@ func discoverVcdInfo(ctx context.Context, svc *vmw.VmwareV1, siteName, vdcName s
 		if *v.DirectorSite.ID != *site.ID {
 			continue
 		}
+
 		// Must match requested vdcName
 		if v.Name != nil && strings.EqualFold(*v.Name, vdcName) {
 			selectedVdc = &v
@@ -299,6 +323,112 @@ func BuildServiceURL(region string) (string, error) {
 	return fmt.Sprintf("https://api.%s.vmware.cloud.ibm.com/v1", region), nil
 }
 
+// EnvironmentConfig holds validated environment variables.
+type EnvironmentConfig struct {
+	APIKey      string
+	Region      string
+	SiteName    string
+	VDCName     string
+	TaskTimeout string
+}
+
+// validateEnvironment validates required environment variables.
+func validateEnvironment() (*EnvironmentConfig, error) {
+	var missing []string
+
+	apiKey := os.Getenv("IBM_APIKEY")
+	if apiKey == "" {
+		missing = append(missing, "IBM_APIKEY")
+	}
+
+	region := os.Getenv("IBM_REGION")
+	if region == "" {
+		missing = append(missing, "IBM_REGION")
+	}
+
+	vdcName := os.Getenv("VIRTUAL_DATA_CENTER")
+	if vdcName == "" {
+		missing = append(missing, "VIRTUAL_DATA_CENTER")
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("required environment variables missing: %s\nPlease set:\n  export %s=<value>",
+			strings.Join(missing, ", "),
+			strings.Join(missing, "=<value>\n  export "))
+	}
+
+	// Validate region
+	if region != "" && !isAllowed(region) {
+		return nil, fmt.Errorf("invalid region %q\nAllowed regions: %s",
+			region, strings.Join(allowedRegions, ", "))
+	}
+
+	return &EnvironmentConfig{
+		APIKey:      apiKey,
+		Region:      region,
+		SiteName:    os.Getenv("DIRECTOR_SITE_NAME"),
+		VDCName:     vdcName,
+		TaskTimeout: os.Getenv("TASK_TIMEOUT_SECONDS"),
+	}, nil
+}
+
+// validateConfig validates the configuration structure and content.
+func validateConfig(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("configuration is nil")
+	}
+
+	if len(cfg.Entities) == 0 {
+		return fmt.Errorf("no entities defined in configuration")
+	}
+
+	// Validate entities
+	for i, entity := range cfg.Entities {
+		if entity.Name == "" {
+			return fmt.Errorf("entities[%d]: name cannot be empty", i)
+		}
+		if !isValidEntityType(entity.Type) {
+			return fmt.Errorf("entities[%d] (%s): invalid type %q, must be %q or %q",
+				i, entity.Name, entity.Type, vmType, vappType)
+		}
+	}
+
+	// Validate timezone if specified
+	if cfg.Exclusions.Timezone != "" {
+		_, err := time.LoadLocation(cfg.Exclusions.Timezone)
+		if err != nil {
+			return fmt.Errorf("invalid timezone %q: %w\nExample valid timezones: America/New_York, Europe/London, UTC",
+				cfg.Exclusions.Timezone, err)
+		}
+	}
+
+	// Validate all dates in exclusions
+	for i, d := range cfg.Exclusions.Dates {
+		if _, err := parseDate(d.Date); err != nil {
+			return fmt.Errorf("exclusions.dates[%d]: %w", i, err)
+		}
+	}
+
+	for i, r := range cfg.Exclusions.Ranges {
+		if _, err := parseDate(r.From); err != nil {
+			return fmt.Errorf("exclusions.ranges[%d].from: %w", i, err)
+		}
+		if _, err := parseDate(r.To); err != nil {
+			return fmt.Errorf("exclusions.ranges[%d].to: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+// ProcessingResult tracks the result of processing an entity.
+type ProcessingResult struct {
+	EntityName string
+	EntityType string
+	Success    bool
+	Error      error
+}
+
 func main() {
 	log := logging.NewLogger().With("app", "ce-vcd-power-schedule")
 	corrID := logging.NewCorrelationID()
@@ -308,10 +438,20 @@ func main() {
 		log.Info("received arguments", slog.String("action", os.Args[1]))
 	} else {
 		log.Error("missing or invalid argument", slog.String("usage", "powerOn | powerOff"))
-		return
+		os.Exit(1)
 	}
 
 	action := os.Args[1]
+
+	// Validate environment variables
+	envConfig, err := validateEnvironment()
+	if err != nil {
+		log.Error("environment validation failed",
+			slog.String("component", "environment"),
+			slog.Any("error", err),
+		)
+		os.Exit(1)
+	}
 
 	cfgPath := os.Getenv("CONFIG_PATH")
 	if cfgPath == "" {
@@ -326,58 +466,70 @@ func main() {
 			slog.Any("error", err),
 			slog.Int64("duration.ms", t.Elapsed_ms()),
 		)
-		return
+		os.Exit(1)
 	}
 	log.Info("configuration loaded", slog.String("component", "config"), slog.Int64("duration.ms", t.Elapsed_ms()))
 
-	now := nowInLocation(cfg.Exclusions.Timezone)
-	if excluded, why := inExclusions(cfg, now); excluded {
+	// Validate configuration
+	if err := validateConfig(cfg); err != nil {
+		log.Error("configuration validation failed",
+			slog.String("component", "config"),
+			slog.String("path", cfgPath),
+			slog.Any("error", err),
+		)
+		os.Exit(1)
+	}
+
+	now := nowInLocation(cfg.Exclusions.Timezone, log)
+	excluded, why, err := inExclusions(cfg, now)
+	if err != nil {
+		log.Error("failed to check exclusions",
+			slog.String("component", "scheduler"),
+			slog.Any("error", err),
+		)
+		os.Exit(1)
+	}
+	if excluded {
 		log.Info("skip execution due to exclusion",
 			slog.String("component", "scheduler"),
 			slog.String("reason", why),
 			slog.String("timezone", cfg.Exclusions.Timezone),
 			slog.Time("now", now),
 		)
-		return
+		os.Exit(0)
 	}
 
-	apiKey := os.Getenv("IBM_APIKEY")
-	region := os.Getenv("IBM_REGION")
-	siteName := os.Getenv("DIRECTOR_SITE_NAME")
-	vdcName := os.Getenv("VIRTUAL_DATA_CENTER")
-	taskTimeout := os.Getenv("TASK_TIMEOUT_SECONDS")
-
 	t = logging.StartTimed()
-	svc, auth, err := buildVmwareService(apiKey, region)
+	svc, auth, err := buildVmwareService(envConfig.APIKey, envConfig.Region)
 	if err != nil {
 		log.Error("failed to initialize VMware VCFaaS service",
 			slog.String("component", "vcf-service"),
-			slog.String("region", region),
+			slog.String("region", envConfig.Region),
 			slog.Any("error", err),
 			slog.Int64("duration.ms", t.Elapsed_ms()),
 		)
-		return
+		os.Exit(1)
 	}
-	log.Info("VCFaaS client initialized", slog.String("component", "vcf-service"), slog.String("region", region), slog.Int64("duration.ms", t.Elapsed_ms()))
+	log.Info("VCFaaS client initialized", slog.String("component", "vcf-service"), slog.String("region", envConfig.Region), slog.Int64("duration.ms", t.Elapsed_ms()))
 
 	ctx := context.Background()
 
 	t = logging.StartTimed()
-	vcd, err := discoverVcdInfo(ctx, svc, siteName, vdcName)
+	vcd, err := discoverVcdInfo(ctx, svc, envConfig.SiteName, envConfig.VDCName)
 	if err != nil {
 		log.Error("VCD discovery failed",
 			slog.String("component", "discovery"),
-			slog.String("site", siteName),
-			slog.String("vdc", vdcName),
+			slog.String("site", envConfig.SiteName),
+			slog.String("vdc", envConfig.VDCName),
 			slog.Any("error", err),
 			slog.Int64("duration.ms", t.Elapsed_ms()),
 		)
-		return
+		os.Exit(1)
 	}
 	log.Info("Discovered VCD info",
 		slog.String("component", "discovery"),
-		slog.String("vdc", vdcName),
-		slog.String("site", siteName),
+		slog.String("vdc", envConfig.VDCName),
+		slog.String("site", envConfig.SiteName),
 		slog.String("org", vcd.OrgName),
 		slog.String("api_base", vcd.APIBase),
 		slog.Int64("duration.ms", t.Elapsed_ms()))
@@ -392,7 +544,7 @@ func main() {
 			slog.Any("error", err),
 			slog.Int64("duration.ms", t.Elapsed_ms()),
 		)
-		return
+		os.Exit(1)
 	}
 	log.Info("IAM token acquired", slog.String("component", "iam"), slog.Int64("duration.ms", t.Elapsed_ms()))
 
@@ -402,9 +554,9 @@ func main() {
 		IAMToken: accessToken,
 		Log:      log,
 	}
-	if taskTimeout != "" {
-		if t, err := time.ParseDuration(taskTimeout + "s"); err == nil {
-			cloudDirectorV1Options.Timeout = t
+	if envConfig.TaskTimeout != "" {
+		if timeout, err := time.ParseDuration(envConfig.TaskTimeout + "s"); err == nil {
+			cloudDirectorV1Options.Timeout = timeout
 		}
 	}
 
@@ -416,17 +568,183 @@ func main() {
 			slog.Any("error", err),
 			slog.Int64("duration.ms", t.Elapsed_ms()),
 		)
-		return
+		os.Exit(1)
 	}
 	log.Info("VCD client initialized", slog.String("component", "vcd-client"), slog.Int64("duration.ms", t.Elapsed_ms()))
 
+	// Process entities and track results
+	results := make([]ProcessingResult, 0, len(cfg.Entities))
+	log.Info("processing entities", slog.String("component", "main"), slog.Int("count", len(cfg.Entities)))
+
 	for _, entity := range cfg.Entities {
-		handleEntity(vcdClient, entity, action, log)
+		result := ProcessingResult{
+			EntityName: entity.Name,
+			EntityType: entity.Type,
+			Success:    false,
+		}
+
+		err := handleEntityWithResult(vcdClient, entity, action, log)
+		if err != nil {
+			result.Error = err
+		} else {
+			result.Success = true
+		}
+
+		results = append(results, result)
+	}
+
+	// Generate summary
+	successCount := 0
+	failureCount := 0
+	for _, r := range results {
+		if r.Success {
+			successCount++
+		} else {
+			failureCount++
+		}
+	}
+
+	log.Info("processing complete",
+		slog.String("component", "main"),
+		slog.Int("total", len(results)),
+		slog.Int("successful", successCount),
+		slog.Int("failed", failureCount),
+	)
+
+	if failureCount > 0 {
+		log.Error("some entities failed to process",
+			slog.String("component", "main"),
+			slog.Int("failed_count", failureCount),
+		)
+		os.Exit(1)
 	}
 }
 
 func isValidEntityType(entityType string) bool {
 	return entityType == vmType || entityType == vappType
+}
+
+// handleEntityWithResult handles power operations and returns an error for tracking.
+func handleEntityWithResult(vcdClient *clouddirector.CloudDirectorV1, entity Entity, action string, log *slog.Logger) error {
+	if !isValidEntityType(entity.Type) {
+		err := fmt.Errorf("entity type %q not supported, must be %q or %q", entity.Type, vmType, vappType)
+		log.Error("Entity type not supported",
+			slog.String("component", "handler.entity"),
+			slog.String("entity.type", entity.Type),
+			slog.String("entity.name", entity.Name),
+			slog.Any("error", err),
+		)
+		return err
+	}
+
+	t := logging.StartTimed()
+	record, _, err := vcdClient.GetObjectByName(&clouddirector.GetObjectByNameOptions{
+		Name: entity.Name,
+		Type: entity.Type,
+	})
+	if err != nil {
+		log.Error("GetObjectByName failed",
+			slog.String("component", "handler.entity"),
+			slog.String("action", action),
+			slog.String("entity.type", entity.Type),
+			slog.String("entity.name", entity.Name),
+			slog.Any("error", err),
+			slog.Int64("duration.ms", t.Elapsed_ms()),
+		)
+		return fmt.Errorf("failed to get entity %q: %w", entity.Name, err)
+	}
+
+	if record == nil {
+		err := fmt.Errorf("entity %q not found", entity.Name)
+		log.Error("entity not found",
+			slog.String("component", "handler.entity"),
+			slog.String("entity.type", entity.Type),
+			slog.String("entity.name", entity.Name),
+			slog.Int64("duration.ms", t.Elapsed_ms()),
+			slog.String("suggestion", "Check that the entity exists in VCD and the name is correct"),
+		)
+		return err
+	}
+
+	// Validate required fields
+	if record.Href == nil || *record.Href == "" {
+		err := fmt.Errorf("entity %q has no href", entity.Name)
+		log.Error("entity has invalid href",
+			slog.String("component", "handler.entity"),
+			slog.String("entity.type", entity.Type),
+			slog.String("entity.name", entity.Name),
+			slog.Any("error", err),
+		)
+		return err
+	}
+
+	log.Info("entity located",
+		slog.String("component", "handler.entity"),
+		slog.String("entity.type", entity.Type),
+		slog.String("entity.name", entity.Name),
+		slog.String("status", safeString(record.Status)),
+		slog.Int64("duration.ms", t.Elapsed_ms()),
+	)
+
+	task, err := performAction(action, entity, record, vcdClient, log)
+
+	if err != nil {
+		log.Error(fmt.Sprintf("%s %s failed", action, entity.Type),
+			slog.String("component", "handler.entity"),
+			slog.String("entity.name", entity.Name),
+			slog.String("entity.type", entity.Type),
+			slog.String("action", action),
+			slog.String("status", safeString(record.Status)),
+			slog.Any("error", err),
+			slog.Int64("duration.ms", t.Elapsed_ms()),
+		)
+		return fmt.Errorf("action %s failed for %s %q: %w", action, entity.Type, entity.Name, err)
+	}
+
+	if task == nil {
+		// No task means no action was needed (e.g., already powered off)
+		log.Info(fmt.Sprintf("%s %s - no action needed", entity.Type, action),
+			slog.String("component", "handler.entity"),
+			slog.String("entity.name", entity.Name),
+			slog.String("entity.type", entity.Type),
+			slog.String("action", action),
+			slog.String("status", safeString(record.Status)),
+		)
+		return nil
+	}
+
+	log.Info(fmt.Sprintf("%s %s task started", action, entity.Type),
+		slog.String("component", "handler.entity"),
+		slog.String("entity.name", entity.Name),
+		slog.String("entity.type", entity.Type),
+		slog.String("action", action),
+		slog.String("task.id", safeString(task.ID)),
+	)
+
+	wait := logging.StartTimed()
+	err = vcdClient.WaitTaskCompletion(task)
+	if err != nil {
+		log.Error(fmt.Sprintf("%s %s task failed", action, entity.Type),
+			slog.String("component", "handler.entity"),
+			slog.String("entity.name", entity.Name),
+			slog.String("entity.type", entity.Type),
+			slog.String("action", action),
+			slog.String("task.id", safeString(task.ID)),
+			slog.Any("error", err),
+			slog.Int64("duration.ms", wait.Elapsed_ms()),
+		)
+		return fmt.Errorf("task failed for %s %q: %w", entity.Type, entity.Name, err)
+	}
+
+	log.Info(fmt.Sprintf("%s %s successfully", entity.Type, action),
+		slog.String("component", "handler.entity"),
+		slog.String("entity.name", entity.Name),
+		slog.String("entity.type", entity.Type),
+		slog.String("action", action),
+		slog.String("task.id", safeString(task.ID)),
+		slog.Int64("duration.ms", wait.Elapsed_ms()),
+	)
+	return nil
 }
 
 // handleEntity handles power operations for VMs and vApps.

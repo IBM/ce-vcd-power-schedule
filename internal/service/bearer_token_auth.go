@@ -3,6 +3,7 @@ package clouddirector
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -63,7 +64,7 @@ func (authenticator *BearerTokenAuth) SaveTokenInfo(options *BearerTokenAuthOpti
 
 	req, err := http.NewRequest(http.MethodPost, requestURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
 
 	// Required headers (Accept + Authorization containing IAM token + org).
@@ -74,14 +75,23 @@ func (authenticator *BearerTokenAuth) SaveTokenInfo(options *BearerTokenAuthOpti
 	authenticator.Log.Info("Send token request to", slog.String("url", requestURL))
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("token request failed: %w\nURL: %s\nSuggestion: Check network connectivity and VCD endpoint", err, requestURL)
 	}
+
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("token request failed: status %d", resp.StatusCode)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("token exchange failed with status %d\nURL: %s\nResponse: %s\nSuggestion: Verify IBM_APIKEY is valid and has access to organization %q",
+			resp.StatusCode, requestURL, string(bodyBytes), options.Org)
 	}
 
 	// extracts the bearer token from the X-VMWARE-VCLOUD-ACCESS-TOKEN header.
 	authenticator.BearerToken = resp.Header.Get(tokenHeaderName)
+
+	if authenticator.BearerToken == "" {
+		return nil, fmt.Errorf("bearer token not found in response headers\nExpected header: %s\nReceived headers: %v\nSuggestion: Check VCD API version compatibility",
+			tokenHeaderName, resp.Header)
+	}
 
 	authenticator.Log.Info("Token response received")
 	return resp, nil
