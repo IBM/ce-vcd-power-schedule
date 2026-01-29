@@ -53,6 +53,7 @@ You must have at least the following roles. You can check your access by going t
   export RESOURCE_GROUP=          # Resource group name used to deploy resources
   export IBM_REGION=              # "us-east" or "eu-de"
   export IBM_APIKEY=              # IBM Cloud API key used to deploy resources and stored into Code Engine secret
+  export TASK_TIMEOUT_SECONDS=    # (Optional) Timeout in seconds for VCD task completion (default: 900 seconds / 15 minutes)
   ```
 
 **3. Run `deploy.sh` script**
